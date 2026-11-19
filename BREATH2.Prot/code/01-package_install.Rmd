@@ -1,0 +1,114 @@
+---
+title: "01-package_install"
+output: 
+  html_notebook:
+    toc: true
+---
+
+```{r message=F, warning=F}
+
+
+
+
+
+
+
+# 1.1 Install packages
+
+# CRAN packages
+cran_packages <- c(
+  "dplyr",
+  "magrittr",
+  "rsample",
+  "ggplot2",
+  "glmnet",
+  "tibble",
+  "randomForest",
+  "pROC",
+  "ggrepel",
+  "msigdbr",
+  "stringr",
+  "tidyr",
+  "patchwork"
+)
+
+# Bioconductor packages
+bioc_packages <- c(
+  "DESeq2",
+  "edgeR",
+  "limma",
+  "clusterProfiler",
+  "AnnotationDbi",
+  "SomaScan.db"
+)
+
+# Install only missing CRAN packages
+missing_cran <- cran_packages[
+  !vapply(cran_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_cran) > 0) {
+  message("Installing missing CRAN packages: ",
+          paste(missing_cran, collapse = ", "))
+
+  install.packages(
+    missing_cran,
+    type = "binary"
+  )
+} else {
+  message("All required CRAN packages are already installed.")
+}
+
+# Install BiocManager if necessary
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager", type = "binary")
+}
+
+# Install only missing Bioconductor packages
+missing_bioc <- bioc_packages[
+  !vapply(bioc_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_bioc) > 0) {
+  message("Installing missing Bioconductor packages: ",
+          paste(missing_bioc, collapse = ", "))
+
+  BiocManager::install(
+    missing_bioc,
+    ask = FALSE,
+    update = FALSE
+  )
+} else {
+  message("All required Bioconductor packages are already installed.")
+}
+
+
+
+
+
+
+# 1.2 Verify package availability
+
+
+all_packages <- c(cran_packages, bioc_packages)
+
+package_status <- data.frame(
+  Package = all_packages,
+  Installed = vapply(
+    all_packages,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
+)
+
+print(package_status)
+
+
+
+
+
+
+```
+
+

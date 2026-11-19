@@ -1,0 +1,558 @@
+---
+title: "07-roc_curve_auc"
+output: 
+  html_notebook:
+    toc: true
+---
+
+```{r, warning=F, message=F}
+
+
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(pROC)
+
+source("../../00-constants.R")
+
+
+
+
+
+
+# 7.1. Import metadata & predictions
+
+
+metadata_df_with_folds <- read.csv(
+  file.path(prot_data_dir, "metadata_df_with_folds.csv"),
+  stringsAsFactors=F
+)
+
+# All prediction files
+classifier_files <- tibble(
+  classifier = c(
+    "Full LASSO",
+    "3-feature LASSO",
+    "1-feature LASSO",
+    "FABP4",
+    "ISG15"
+  ),
+  csv = c(
+    "lassoRF_preds.csv",
+    "lassoRF_preds_n3.csv",
+    "lassoRF_preds_n1.csv",
+    "lassoRF_preds_FABP4.csv",
+    "lassoRF_preds_ISG15.csv"
+  ),
+  suffix = c(
+    "prot",
+    "n3_prot",
+    "n1_prot",
+    "FABP4_prot",
+    "ISG15_prot"
+  )
+)
+
+pred_list <- classifier_files %>%
+  mutate(
+    preds = lapply(csv, function(f) {
+      read.csv(
+        file.path(prot_results_dir, f),
+        stringsAsFactors=F
+      ) %>%
+        mutate(
+          LRTI_adjudication = factor(
+            LRTI_adjudication,
+            levels = c("No Evidence", "Definite")
+          )
+        ) %>%
+        inner_join(
+          metadata_df_with_folds %>%
+            dplyr::select(sample_name, fold),
+          by = "sample_name"
+        )
+    })
+  )
+
+
+
+
+
+
+# 7.2. AUC helper function
+
+
+output_auc_roc <- function(preds_df, output_suffix) {
+
+  # Per-fold AUC
+  auc_df <- preds_df %>%
+    group_by(fold) %>%
+    summarize({
+      roc_obj <- pROC::roc(
+        response = factor(
+          LRTI_adjudication,
+          levels = c("No Evidence", "Definite")
+        ),
+        predictor = pred,
+        direction = "<"
+      )
+
+      ci_vals <- pROC::ci.auc(roc_obj)
+
+      tibble(
+        auc = as.numeric(roc_obj$auc),
+        auc_lower = ci_vals[1],
+        auc_upper = ci_vals[3]
+      )
+    }, .groups = "drop")
+
+  # Fold ROC PDF
+  pdf(
+    file.path(
+      prot_results_dir,
+      paste0("ROC_", output_suffix, ".pdf")
+    )
+  )
+
+  for (i in sort(unique(preds_df$fold))) {
+
+    fold_data <- preds_df %>%
+      filter(fold == i)
+
+    roc_obj <- pROC::roc(
+      response = factor(
+        fold_data$LRTI_adjudication,
+        levels = c("No Evidence", "Definite")),
+      predictor = fold_data$pred,
+      direction = "<"
+    )
+
+    plot(
+      roc_obj,
+      add = (i != 1),
+      col = i
+    )
+  }
+
+  dev.off()
+
+  write.csv(
+    auc_df,
+    file.path(prot_results_dir,
+      paste0("cv_auc_", output_suffix, ".csv")),
+    row.names=F
+  )
+
+  # Pooled ROC + DeLong CI
+  pooled_roc <- pROC::roc(
+    response = factor(
+      preds_df$LRTI_adjudication,
+      levels = c("No Evidence", "Definite")
+    ),
+    predictor = preds_df$pred,
+    direction = "<"
+  )
+
+  ci_auc <- pROC::ci.auc(pooled_roc)
+
+  pooled_summary <- data.frame(
+    auc   = as.numeric(ci_auc[2]),
+    lower = ci_auc[1],
+    upper = ci_auc[3]
+  )
+
+  write.csv(
+    pooled_summary,
+    file.path(prot_results_dir,
+      paste0("pooled_auc_", output_suffix, ".csv")),
+    row.names=F
+  )
+
+  list(
+    fold_auc = auc_df,
+    pooled = pooled_summary
+  )
+}
+
+
+
+
+
+
+# 7.3. Run all five classifiers
+
+
+auc_results <- pred_list %>%
+  mutate(
+    results = Map(output_auc_roc, preds, suffix)
+  )
+
+# Full LASSO objects retained for downstream sections
+merged_preds <- pred_list$preds[[1]]
+auc_lassoRF  <- auc_results$results[[1]]$fold_auc
+
+
+
+
+
+
+# 7.4. Full LASSO summary
+
+
+ci_auc <- read.csv(
+  file.path(
+    prot_results_dir, "pooled_auc_prot.csv"
+  )
+)
+
+message(
+  "Full LASSO AUC: ",
+  round(ci_auc$auc, 2),
+  " (95% CI: ",
+  round(ci_auc$lower, 2),
+  "–",
+  round(ci_auc$upper, 2),
+  ")"
+)
+
+
+
+
+
+
+# 7.5. Forest plot data – all protein classifiers
+
+
+forest_data_prot <- auc_results %>%
+  transmute(
+    classifier,
+    auc   = sapply(results, function(x) x$pooled$auc),
+    lower = sapply(results, function(x) x$pooled$lower),
+    upper = sapply(results, function(x) x$pooled$upper)
+  ) %>%
+  mutate(
+    classifier = factor(
+      classifier,
+      levels = c(
+        "ISG15",
+        "FABP4",
+        "1-feature LASSO",
+        "3-feature LASSO",
+        "Full LASSO"
+      )
+    )
+  )
+
+# Save results for figure 4A
+write.csv(
+  forest_data_prot,
+  file.path(prot_results_dir, "forest_data_protein_classifiers.csv"),
+  row.names=F
+)
+
+
+
+
+
+
+# 7.6. Full LASSO vs 3-protein classifier ROC curves
+
+
+# Prepare predictions
+lassoRF_preds_lambda <- pred_list$preds[[
+  which(classifier_files$classifier == "Full LASSO")
+]]
+
+lassoRF_preds_n3 <- pred_list$preds[[
+  which(classifier_files$classifier == "3-feature LASSO")
+]]
+
+
+# Compute ROC objects
+roc_lambda <- pROC::roc(
+  response = lassoRF_preds_lambda$LRTI_adjudication,
+  predictor = lassoRF_preds_lambda$pred,
+  direction = "<",
+  ci = TRUE
+)
+
+roc_n3 <- pROC::roc(
+  response = lassoRF_preds_n3$LRTI_adjudication,
+  predictor = lassoRF_preds_n3$pred,
+  direction = "<",
+  ci = TRUE
+)
+
+# Prepare ROC data frames for ggplot
+roc_lambda_df_prot <- data.frame(
+  specificity = roc_lambda$specificities,
+  sensitivity = roc_lambda$sensitivities,
+  classifier  = "Full LASSO"
+) %>%
+  arrange(
+    specificity,
+    sensitivity
+  )
+
+roc_n3_df_prot <- data.frame(
+  specificity = roc_n3$specificities,
+  sensitivity = roc_n3$sensitivities,
+  classifier  = "3-protein classifier"
+) %>%
+  arrange(
+    specificity,
+    sensitivity
+)
+
+roc_combined_prot <- bind_rows(
+  roc_lambda_df_prot,
+  roc_n3_df_prot
+) %>%
+  mutate(
+    classifier = factor(
+      classifier,
+      levels = c(
+        "Full LASSO",
+        "3-protein classifier"
+      )
+    )
+  )
+
+
+# Prepare CI ribbon data frames
+ci_lambda <- pROC::ci.se(
+  roc_lambda,
+  specificities = seq(0, 1, 0.01)
+)
+
+ci_n3 <- pROC::ci.se(
+  roc_n3,
+  specificities = seq(0, 1, 0.01)
+)
+
+ci_lambda_df_prot <- data.frame(
+  specificity       = as.numeric(rownames(ci_lambda)),
+  sensitivity_lower = ci_lambda[, 1],
+  sensitivity_upper = ci_lambda[, 3],
+  classifier        = "Full LASSO"
+) %>%
+  arrange(specificity)
+
+ci_n3_df_prot <- data.frame(
+  specificity       = as.numeric(rownames(ci_n3)),
+  sensitivity_lower = ci_n3[, 1],
+  sensitivity_upper = ci_n3[, 3],
+  classifier        = "3-protein classifier"
+) %>%
+  arrange(specificity)
+
+ci_combined_prot <- bind_rows(
+  ci_lambda_df_prot,
+  ci_n3_df_prot
+) %>%
+  mutate(
+    classifier = factor(
+      classifier,
+      levels = c(
+        "Full LASSO",
+        "3-protein classifier"
+      )
+    )
+  )
+
+
+# Get pooled AUC values
+auc_lambda <- auc_results$results[[
+  which(
+    classifier_files$classifier == "Full LASSO"
+  )
+]]$pooled
+
+auc_n3 <- auc_results$results[[
+  which(
+    classifier_files$classifier == "3-feature LASSO"
+  )
+]]$pooled
+
+
+# Legend labels with AUC values
+classifier_labels_prot <- c(
+  "Full LASSO" = sprintf(
+    "Full LASSO: AUC = %.2f (%.2f–%.2f)",
+    auc_lambda$auc,
+    auc_lambda$lower,
+    auc_lambda$upper
+  ),
+  "3-protein classifier" = sprintf(
+    "3-protein classifier: AUC = %.2f (%.2f–%.2f)",
+    auc_n3$auc,
+    auc_n3$lower,
+    auc_n3$upper
+  )
+)
+
+
+# Create ROC plot
+
+roc_plot_gg_prot <- ggplot() +
+
+  # Diagonal reference line
+  geom_abline(
+    intercept = 1,
+    slope = -1,
+    linetype = "dashed",
+    color = "grey80",
+    linewidth = 0.8,
+    show.legend = FALSE
+  ) +
+
+  # Confidence interval ribbons
+  geom_ribbon(
+    data = ci_combined_prot,
+    aes(
+      x = specificity,
+      ymin = sensitivity_lower,
+      ymax = sensitivity_upper,
+      fill = classifier,
+      group = classifier
+    ),
+    alpha = 0.12
+  ) +
+
+  # ROC curves
+  geom_line(
+    data = roc_combined_prot,
+    aes(
+      x = specificity,
+      y = sensitivity,
+      color = classifier,
+      group = classifier
+    ),
+    linewidth = 1
+  ) +
+
+  # Axes
+  scale_x_reverse(
+    breaks = seq(0, 1, 0.2),
+    labels = sprintf("%.1f", seq(0, 1, 0.2))
+  ) +
+
+  scale_y_continuous(
+    breaks = seq(0, 1, 0.2),
+    limits = c(0, 1)
+  ) +
+
+  # Colors
+  scale_color_manual(
+    values = c(
+      "Full LASSO" = full_lasso_color,
+      "3-protein classifier" = three_target_color
+    ),
+    labels = classifier_labels_prot,
+    name = NULL
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Full LASSO" = full_lasso_color,
+      "3-protein classifier" = three_target_color
+    ),
+    name = NULL,
+    guide = "none"
+  ) +
+
+  coord_fixed(
+  ) +
+
+  # Labels
+  labs(
+    title = "Performance of multi-protein classifiers",
+    x = "Specificity",
+    y = "Sensitivity"
+  ) +
+
+  # Theme
+  theme_classic(
+    base_family = "Arial"
+  ) +
+
+  theme(
+    text = element_text(
+      family = "Arial",
+      size = 12,
+      face = "plain"
+    ),
+    axis.text = element_text(
+      family = "Arial",
+      size = 16,
+      color = "black"
+    ),
+    axis.title = element_text(
+      family = "Arial",
+      size = 16,
+      face = "plain"
+    ),
+    plot.title = element_text(
+      family = "Arial",
+      size = 16,
+      face = "plain",
+      hjust = 0.5
+    ),
+    legend.text = element_text(
+      family = "Arial",
+      size = 16,
+      face = "plain"
+    ),
+    legend.key.size = unit(1.2, "lines"),
+    legend.position = c(0.58, 0.18),
+    legend.background = element_rect(
+      fill = "white",
+      color = NA
+    )
+  )
+
+
+# Export as PDF
+ggsave(
+  file.path(plots_dir, "(4C)_ROC_lambda_vs_n3_overlaid_prot_gg.pdf"),
+  roc_plot_gg_prot,
+  width = 6.5,
+  height = 6.5,
+  device = cairo_pdf,
+  bg = "white"
+)
+
+# Save Figure 4C plot object for patchwork
+saveRDS(
+  roc_plot_gg_prot,
+  file.path(prot_results_dir,"figure4C.rds")
+)
+
+
+# DeLong test
+delong_test <- pROC::roc.test(
+  roc_lambda,
+  roc_n3,
+  method = "delong"
+)
+
+message(
+  "DeLong test p-value: ",
+  signif(delong_test$p.value, 3)
+)
+
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+

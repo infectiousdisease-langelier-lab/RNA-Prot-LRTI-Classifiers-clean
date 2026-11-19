@@ -1,0 +1,138 @@
+---
+title: "02-protein_lookup_table"
+output: 
+  html_notebook:
+    toc: true
+---
+
+```{r, warning=F, message=F}
+
+
+library(AnnotationDbi)
+library(dplyr)
+library(SomaScan.db)
+
+source("../../00-constants.R") 
+
+
+
+
+
+
+# 2.1. Prepare Seq ids
+
+protein_mat_PROBEID <- read.csv(
+  file.path(raw_data_dir, "protein_mat_PROBEID.csv"),
+  stringsAsFactors=F, row.names=1, check.names=F
+)
+
+metadata_df <- read.csv(
+  file.path(raw_data_dir, "metadata_df.csv"),
+  stringsAsFactors=F
+)
+
+# Extracts all PROBEIDs
+seq_ids <- colnames(protein_mat_PROBEID)
+
+
+
+
+
+
+# 2.2. Build protein lookup table
+
+
+# Build table
+protein_lookup_table_ALL <- SomaScan.db::select(
+  SomaScan.db,
+  keys = seq_ids,
+  keytype = "PROBEID",
+  columns = c("PROBEID", "SYMBOL", "GENENAME", "UNIPROT")
+)
+
+# Remove duplicates
+protein_lookup_table_ALL <- protein_lookup_table_ALL %>% distinct(PROBEID, .keep_all=T)
+
+
+
+
+
+
+# 2.2a. Collect unmapped probes
+
+
+# Removes unannotated PROBEIDs
+protein_lookup_table_ALL <- protein_lookup_table_ALL %>%
+  filter(!is.na(SYMBOL)) %>%
+  arrange(SYMBOL)
+
+
+
+
+
+
+# 2.2b. Take mean expression for PROBEIDs
+
+
+# Keep only annotated probes
+protein_mat_PROBEID <- protein_mat_PROBEID[, colnames(protein_mat_PROBEID) %in% protein_lookup_table_ALL$PROBEID]
+
+# Reorder lookup table to match the columns in protein_mat
+protein_lookup_table_ALL <- protein_lookup_table_ALL[match(colnames(protein_mat_PROBEID), protein_lookup_table_ALL$PROBEID), ]
+
+# Confirm alignment
+stopifnot(all(colnames(protein_mat_PROBEID) == protein_lookup_table_ALL$PROBEID))
+
+# Collapse duplicate probes (mean expression per SYMBOL)
+protein_mat_PROBEID_t <- t(protein_mat_PROBEID) %>%
+  as.data.frame() %>%
+  mutate(SYMBOL = protein_lookup_table_ALL$SYMBOL) %>%
+  group_by(SYMBOL) %>%
+  summarise(across(everything(), mean, na.rm=T)) %>%
+  as.data.frame()
+
+# Restore to original shape
+rownames_tmp <- protein_mat_PROBEID_t$SYMBOL
+
+
+
+
+
+
+# 2.2c. Align tables
+
+
+# Define protein_mat
+protein_mat <- as.data.frame(t(protein_mat_PROBEID_t[, -1]))
+colnames(protein_mat) <- rownames_tmp
+rownames(protein_mat) <- metadata_df$sample_name
+
+# Remove duplicate SYMBOLs in lookup table to match collapsed matrix
+protein_lookup_table <- protein_lookup_table_ALL %>%
+  filter(SYMBOL %in% colnames(protein_mat)) %>%
+  distinct(SYMBOL, .keep_all=T)
+
+# Match lookup table order to protein_mat column order
+protein_lookup_table <- protein_lookup_table[
+  match(colnames(protein_mat),
+  protein_lookup_table$SYMBOL), ]
+
+
+
+
+
+# 2.3. Export protein matrix
+
+
+write.csv(
+  protein_mat,
+  file.path(prot_data_dir,"protein_mat.csv"),
+  row.names=T
+)
+
+
+
+
+
+
+```

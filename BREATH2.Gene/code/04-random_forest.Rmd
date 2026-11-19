@@ -1,0 +1,350 @@
+---
+title: "04-random_forest"
+output: 
+  html_notebook:
+    toc: true
+---
+
+```{r, warning=F, message=F}
+
+
+library(dplyr)
+library(magrittr)
+library(randomForest)
+library(tibble)
+
+source("../../00-constants.R")
+
+
+
+
+
+
+# 4.1. Import Data for RF
+
+
+# Import metadata
+metadata_df_with_folds <- read.csv(
+  file.path(gene_data_dir, "metadata_df_with_folds.csv"),
+  stringsAsFactors=F)
+
+# Import LASSO-selected genes
+lasso_fold_coefs <- read.csv(
+  file.path(gene_results_dir, "lasso_fold_coefs.csv"),
+  stringsAsFactors=F)
+
+lasso_fold_coefs_n3 <- read.csv(
+  file.path(gene_results_dir, "lasso_fold_coefs_n3.csv"),
+  stringsAsFactors=F)
+
+lasso_fold_coefs_n1 <- read.csv(
+  file.path(gene_results_dir, "lasso_fold_coefs_n1.csv"),
+  stringsAsFactors=F)
+
+# Outcome variable
+y <- factor(
+  metadata_df_with_folds$LRTI_adjudication,
+  levels = c("No Evidence", "Definite")
+)
+
+# Number of outer folds
+nfolds <- max(metadata_df_with_folds$fold)
+
+
+
+
+
+
+# 4.2. RF function
+
+
+# Run Random Forest using a specified set of fold-specific features
+run_rf_classifier <- function(selected_coefs, classifier_name) {
+  
+  cv_list <- lapply(seq_len(nfolds), function(test_fold) {
+    
+    set.seed(project_seed + test_fold)
+    
+    # Features selected for this outer test fold
+    keep <- selected_coefs %>%
+      filter(fold == test_fold) %>%
+      pull(gene) %>%
+      unique()
+    
+    # Define training and test samples
+    train <- metadata_df_with_folds$fold != test_fold
+    test  <- metadata_df_with_folds$fold == test_fold
+
+
+    # Load VST matrices generated using this outer fold
+    vsd_train_mat <- readRDS(
+      file.path(
+        gene_data_dir,
+        paste0("vsd_train_fold", test_fold, ".rds")
+      )
+    )
+
+    vsd_test_mat <- readRDS(
+      file.path(
+        gene_data_dir,
+        paste0("vsd_test_fold", test_fold, ".rds")
+      )
+    )
+
+
+    # Check that selected genes are present
+    stopifnot(
+      all(keep %in% rownames(vsd_train_mat)),
+      all(keep %in% rownames(vsd_test_mat))
+    )
+
+
+    # Confirm VST samples match the expected outer fold
+    stopifnot(
+      all(
+        colnames(vsd_train_mat) ==
+        metadata_df_with_folds$sample_name[train]
+      ),
+      all(
+        colnames(vsd_test_mat) ==
+        metadata_df_with_folds$sample_name[test]
+      )
+    )
+
+
+    # Convert VST matrices to samples x genes
+    X_train_all <- t(as.matrix(vsd_train_mat))
+    X_test_all  <- t(as.matrix(vsd_test_mat))
+
+
+    # Keep only selected features
+    X_train <- X_train_all[, keep, drop=F]
+    X_test  <- X_test_all[, keep, drop=F]
+    
+    # Fit RF on training samples only
+    rf <- randomForest(
+      x = X_train,
+      y = y[train],
+      ntree = ntrees
+    )
+    
+    # Predict held-out test fold
+    preds <- predict(
+      rf,
+      newdata = X_test,
+      type = "prob"
+    )[, "Definite"]
+    
+    list(
+      test_fold = test_fold,
+      mod = rf,
+      pred = preds
+    )
+  })
+  
+  # Collect out-of-fold predictions
+  rf_preds <- bind_rows(
+    lapply(cv_list, function(x) {
+      data.frame(
+        sample_name = metadata_df_with_folds$sample_name[
+          metadata_df_with_folds$fold == x$test_fold
+        ],
+        pred = x$pred,
+        stringsAsFactors=F
+      )
+    })
+  ) %>%
+    left_join(
+      metadata_df_with_folds %>%
+        select(sample_name, LRTI_adjudication),
+      by = "sample_name"
+    ) %>%
+    relocate(
+      LRTI_adjudication,
+      .after = sample_name
+    )
+  
+  # Save predictions
+  write.csv(
+    rf_preds,
+    file.path(gene_results_dir,
+      paste0(classifier_name, ".csv")),
+    row.names=F
+  )
+  
+  return(cv_list)
+}
+
+
+
+
+
+
+# 4.3. Run all RF classifiers
+
+
+# Full LASSO classifier
+cv_lasso <- run_rf_classifier(
+  selected_coefs = lasso_fold_coefs,
+  classifier_name = "lassoRF_preds"
+)
+
+# LASSO n = 3 classifier
+cv_lasso_n3 <- run_rf_classifier(
+  selected_coefs = lasso_fold_coefs_n3,
+  classifier_name = "lassoRF_preds_n3"
+)
+
+# LASSO n = 1 classifier
+cv_lasso_n1 <- run_rf_classifier(
+  selected_coefs = lasso_fold_coefs_n1,
+  classifier_name = "lassoRF_preds_n1"
+)
+
+
+# 4.4. Single-biomarker classifiers
+
+
+# Import ENSG-to-gene-symbol mapping
+ensg2gene <- read.csv(
+  file.path(raw_data_dir, "host_gene_counts.csv"),
+  stringsAsFactors=F
+) %>%
+  dplyr::select(X, gene_symbol)
+
+
+# Identify ENSG IDs for FABP4 and ISG15
+fabp4_ensg <- ensg2gene %>%
+  filter(gene_symbol == "FABP4") %>%
+  pull(X)
+
+isg15_ensg <- ensg2gene %>%
+  filter(gene_symbol == "ISG15") %>%
+  pull(X)
+
+
+# Create fold-specific FABP4 selection
+fabp4_coefs <- data.frame(
+  gene_symbol = rep("FABP4", nfolds),
+  gene = rep(fabp4_ensg, nfolds),
+  coef = NA,
+  fold = seq_len(nfolds),
+  stringsAsFactors=F
+)
+
+# Create fold-specific ISG15 selection
+isg15_coefs <- data.frame(
+  gene_symbol = rep("ISG15", nfolds),
+  gene = rep(isg15_ensg, nfolds),
+  coef = NA,
+  fold = seq_len(nfolds),
+  stringsAsFactors=F
+)
+
+
+# FABP4 classifier
+cv_fabp4 <- run_rf_classifier(
+  selected_coefs = fabp4_coefs,
+  classifier_name = "lassoRF_preds_FABP4"
+)
+
+# ISG15 classifier
+cv_isg15 <- run_rf_classifier(
+  selected_coefs = isg15_coefs,
+  classifier_name = "lassoRF_preds_ISG15"
+)
+
+
+
+
+
+
+# 4.5. Collect RF votes
+
+
+# Function to collect OOB probabilities
+collect_rf_votes <- function(cv_list) {
+  
+  bind_rows(
+    lapply(cv_list, function(x) {
+      as.data.frame(x$mod$votes) %>%
+        tibble::rownames_to_column("sample_name") %>%
+        mutate(
+          test_fold = x$test_fold,
+          pred = .data[["Definite"]]
+        ) %>%
+        dplyr::select(
+          test_fold,
+          sample_name,
+          pred
+        )
+    })
+  ) %>%
+    left_join(
+      metadata_df_with_folds %>%
+        select(sample_name, LRTI_adjudication),
+      by = "sample_name"
+    ) %>%
+    relocate(
+      LRTI_adjudication,
+      .after = sample_name
+    )
+}
+
+# Collect votes for each classifier
+rf_votes <- collect_rf_votes(cv_lasso)
+
+rf_votes_n3 <- collect_rf_votes(cv_lasso_n3)
+
+rf_votes_n1 <- collect_rf_votes(cv_lasso_n1)
+
+rf_votes_FABP4 <- collect_rf_votes(cv_fabp4)
+
+rf_votes_ISG15 <- collect_rf_votes(cv_isg15)
+
+
+
+
+
+
+# 4.6. Safety Checks
+
+
+# Number of predictions should equal number of patients
+stopifnot(
+  nrow(read.csv(
+    file.path(gene_results_dir, "lassoRF_preds.csv")
+  )) == nrow(metadata_df_with_folds)
+)
+
+stopifnot(
+  nrow(read.csv(
+    file.path(gene_results_dir, "lassoRF_preds_n3.csv")
+  )) == nrow(metadata_df_with_folds)
+)
+
+stopifnot(
+  nrow(read.csv(
+    file.path(gene_results_dir, "lassoRF_preds_n1.csv")
+  )) == nrow(metadata_df_with_folds)
+)
+
+stopifnot(
+  nrow(read.csv(
+    file.path(gene_results_dir, "lassoRF_preds_FABP4.csv")
+  )) == nrow(metadata_df_with_folds)
+)
+
+stopifnot(
+  nrow(read.csv(
+    file.path(gene_results_dir, "lassoRF_preds_ISG15.csv")
+  )) == nrow(metadata_df_with_folds)
+)
+
+
+
+
+
+
+```
+

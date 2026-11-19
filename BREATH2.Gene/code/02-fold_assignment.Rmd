@@ -1,0 +1,89 @@
+---
+title: "02-fold_assignment"
+output: 
+  html_notebook:
+    toc: true
+---
+
+```{r, warning=F, message=F}
+
+
+library(dplyr)
+library(magrittr)
+library(rsample)
+
+source("../../00-constants.R")
+
+
+
+
+
+
+# 2.1. Import parameters
+
+
+# Number of No Evidence patients
+No_Evidence <- as.numeric(Parameters["No Evidence", "Count"])
+
+# Minimum required per fold
+min_NE_per_fold <- floor(No_Evidence / nfolds)
+
+
+
+
+
+
+# 2.2. Fold Assignment Using rsample
+
+
+folds_ok <- FALSE
+
+# Set seed
+set.seed(project_seed)
+
+# While loop enforcing constraints
+while (!folds_ok) {
+
+  # Stratified k-fold CV
+  vfold_obj <- vfold_cv(
+    data = metadata_df,
+    v = nfolds,
+    strata = "LRTI_adjudication"
+  )
+
+  # Add placeholder fold column
+  metadata_df_with_folds <- metadata_df %>%
+    mutate(fold = NA_integer_)
+
+  # Fill fold assignments
+  for (i in seq_len(nfolds)) {
+    fold_indices <- vfold_obj$splits[[i]]$in_id
+    val_indices <- setdiff(seq_len(nrow(metadata_df)), fold_indices)
+    metadata_df_with_folds$fold[val_indices] <- i
+  }
+
+  # Count how many No Evidence cases per fold
+  counts <- table(
+    metadata_df_with_folds$fold,
+    metadata_df_with_folds$LRTI_adjudication
+  )
+
+  # Check constraint
+  if (all(counts[, "No Evidence"] >= min_NE_per_fold)) {
+    folds_ok <- TRUE
+  }
+}
+
+# Save output
+write.csv(
+  metadata_df_with_folds,
+  file.path(gene_data_dir, "metadata_df_with_folds.csv"),
+  row.names=F
+)
+
+
+
+
+
+
+```

@@ -1,0 +1,56 @@
+---
+title: "03-metadata_df_table"
+output: 
+  html_notebook:
+    toc: true
+---
+
+```{r, warning=F, message=F}
+
+
+source("../../00-constants.R")
+
+
+
+
+
+
+# 3.1. Define Workflow Parameters
+
+
+# Define parameters
+Definite <- table(metadata_df$LRTI_adjudication)["Definite"]
+No_Evidence <- table(metadata_df$LRTI_adjudication)["No Evidence"]
+npatients <- nrow(metadata_df)
+nproteins <- ncol(protein_mat)
+
+# Store parameters as data frame
+Parameters <- data.frame(
+  Count = c(
+    npatients,
+    Definite,
+    No_Evidence,
+    nproteins,
+    nfolds,
+    ntrees
+  )
+)
+
+rownames(Parameters) <- c(
+  "Patients",
+  "Definite",
+  "No Evidence",
+  "Proteins",
+  "Folds",
+  "RF Trees"
+)
+
+
+
+
+
+
+```
+
+
+
